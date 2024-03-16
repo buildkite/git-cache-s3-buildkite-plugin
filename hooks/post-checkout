@@ -1,0 +1,87 @@
+#!/bin/bash
+
+set -o pipefail
+
+# Conditionally upload a tarball of the current .git directory to s3 so future jobs can seed their
+# working directory from that before pull new objects from the origin git repository.
+#
+# This script should never exit non-zero. It makes its best effort to do its
+# job, However if any command fails, we always exit 0 so the job can continue
+# processing. The worst that can happen is the cache gets stale and future jobs
+# will have to do a bit morework. That's preferable to failing this job.
+
+BUCKET="$BUILDKITE_PLUGIN_GIT_CACHE_S3_BUCKET"
+REPO_PATH="${BUILDKITE_ORGANIZATION_SLUG}/${BUILDKITE_PIPELINE_SLUG}/git/"
+ONE_DAY_IN_SECONDS=86400
+
+echo "📦 Updating git cache in ${BUCKET}"
+
+if [ -z "${BUCKET}" ]; then
+  echo "WARNING: plugin `bucket` parameter not set"
+  return 0
+fi
+
+# NOTE: same logic as in hooks/pre-checkout
+CACHED_TARBALL_LATEST=$(aws --output json s3api list-objects-v2 --bucket "${BUCKET}" --prefix "${REPO_PATH}" --query 'Contents[].Key' | jq -sr 'sort[] | reverse[] | select(endswith(".git.tar"))' | head -n1 )
+
+if [ $? -gt 0 ]; then
+  echo "WARNING: Failed to list bucket s3://${BUCKET}${REPO_PATH}"
+  exit 0
+fi
+
+if [ -z "${CACHED_TARBALL_LATEST}" ]; then
+
+  echo "  ↳ WARNING: No cached git dirs found in ${BUCKET}${REPO_PATH}. Assuming last modified epoch of 0"
+  CACHED_TARBALL_LATEST_MODIFIED_EPOCH=0
+
+else
+
+  CACHED_TARBALL_LATEST_MODIFIED=$(aws --output json s3api list-objects-v2 --bucket "${BUCKET}" --prefix "${CACHED_TARBALL_LATEST}" --query 'Contents[0].LastModified' | jq -r)
+
+  if [ $? -gt 0 ]; then
+    echo "WARNING: Failed to fetch modified date of s3://${BUCKET}${CACHED_TARBALL_LATEST}"
+    exit 0
+  fi
+
+  echo "last modified at: ${CACHED_TARBALL_LATEST_MODIFIED}"
+
+  CACHED_TARBALL_LATEST_MODIFIED_EPOCH=$(date -d "${CACHED_TARBALL_LATEST_MODIFIED}" +%s)
+
+  if [ $? -gt 0 ]; then
+    echo "WARNING: Failed to parse modified date (${CACHED_TARBALL_LATEST_MODIFIED})"
+    exit 0
+  fi
+
+  echo "last modified at (epoch): ${CACHED_TARBALL_LATEST_MODIFIED_EPOCH}"
+fi
+
+NOW_EPOCH=$(date +%s)
+
+DIFF_SECONDS="$(($NOW_EPOCH-$CACHED_TARBALL_LATEST_MODIFIED_EPOCH))"
+
+echo "age of cache (seconds): ${DIFF_SECONDS}"
+
+if [ "${DIFF_SECONDS}" -lt "${ONE_DAY_IN_SECONDS}" ]; then
+  echo "cache is recent, nothing to do"
+  exit 0
+fi
+
+echo "cache age > ${ONE_DAY_IN_SECONDS}, generating new cache tarball"
+
+FILENAME="cache-$(date -u +"%Y-%m-%dT%H:%M:%SZ").git.tar"
+TMP_TARBALL="/tmp/${FILENAME}"
+tar -cf ${TMP_TARBALL} -C ${BUILDKITE_BUILD_CHECKOUT_PATH} --add-file .git
+
+ls -lh /tmp
+
+S3_DESTINATION_KEY="${REPO_PATH}${FILENAME}"
+
+echo "Uploading ${TMP_TARBALL} to s3://${BUCKET}/${S3_DESTINATION_KEY}"
+aws s3 cp "${TMP_TARBALL}" "s3://${BUCKET}/${S3_DESTINATION_KEY}" --no-progress
+
+if [ $? -gt 0 ]; then
+  echo "WARNING: Failed to upload tarball ${TMP_TARBALL} to s3://${BUCKET}/${S3_DESTINATION_KEY}"
+  exit 0
+fi
+
+rm ${TMP_TARBALL}

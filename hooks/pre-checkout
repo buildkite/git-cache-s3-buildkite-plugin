@@ -1,0 +1,75 @@
+#!/bin/bash
+
+set -o pipefail
+
+# Check an S3 bucket for a tarball of the git repository used by this pipeline. If we find one,
+# download and unpack it into the normal working directory that'll be used by the Buildkite job.
+#
+# This ia pre-checkout hook, so we leave the working directory with a copy of the .git directory.
+# The default agent checkout hook will run next, fetching any new objects from the origin and
+# resetting the directory to the commit that's being built. We expect the number of objects to
+# be fetched from the origin to be relatively small.
+#
+# This script should never exit non-zero. It makes its best effort to find the cached tarball,
+# download and decompress it. However if any command fails, we always exit 0 so the checkout hook can
+# do its job, just without the speed or cost benefit of a warm cache.
+
+BUCKET="$BUILDKITE_PLUGIN_GIT_CACHE_S3_BUCKET"
+REPO_PATH="${BUILDKITE_ORGANIZATION_SLUG}/${BUILDKITE_PIPELINE_SLUG}/git/"
+TMP_TARBALL="/tmp/${BUILDKITE_PIPELINE_SLUG}-$(date +%s).git.tar"
+
+echo "📦 Restoring cache for ${REPO_PATH} from ${BUCKET}"
+
+# TODO: check for BUILDKITE_GIT_MIRRORS_PATH and early exit? Will this strategy even work when git mirrors are in play?
+
+if [ -z "$BUCKET" ]; then
+  echo "WARNING: plugin `bucket` parameter not set"
+  exit 0
+fi
+
+if [ -d $BUILDKITE_BUILD_CHECKOUT_PATH ]; then
+  echo "checkout path (${BUILDKITE_BUILD_CHECKOUT_PATH}) already exists, no need to fetch cache"
+  exit 0
+fi
+
+echo "checkout path (${BUILDKITE_BUILD_CHECKOUT_PATH}) doesn't exist, creating"
+mkdir -p $BUILDKITE_BUILD_CHECKOUT_PATH
+
+# Fetch the most recent S3 backup key
+CACHED_TARBALL_KEY=$(aws --output json s3api list-objects-v2 --bucket "$BUCKET" --prefix "$REPO_PATH" --query 'Contents[].Key' | jq -sr 'sort[] | reverse[] | select(endswith(".git.tar"))' | head -n1 )
+
+if [ $? -gt 0 ]; then
+  echo "WARNING: Failed to list bucket s3://${BUCKET}${REPO_PATH}"
+  exit 0
+fi
+
+# Exit early if there's no available cache
+if [ -z "$CACHED_TARBALL_KEY" ]; then
+  echo "WARNING: No cached git dirs found in s3://${BUCKET}${REPO_PATH}"
+  exit 0
+fi
+
+echo "Downloading s3://${BUCKET}/${CACHED_TARBALL_KEY} to ${TMP_TARBALL}"
+rm -rf "${TMP_TARBALL}" # Delete before starting, just in case
+
+aws s3 cp "s3://${BUCKET}/${CACHED_TARBALL_KEY}" "${TMP_TARBALL}" --no-progress
+
+if [ $? -gt 0 ]; then
+  echo "WARNING: Failed to download cache file"
+  exit 0
+fi
+
+SIZE=$(du -sh "${TMP_TARBALL}"  | cut -f1 -d$'\t')
+
+echo "Download Size: ${SIZE}"
+
+echo "Decompressing ${TMP_TARBALL} to ${BUILDKITE_BUILD_CHECKOUT_PATH}"
+tar -xf "${TMP_TARBALL}" -C "${BUILDKITE_BUILD_CHECKOUT_PATH}"
+
+if [ $? -gt 0 ]; then
+  echo "WARNING: Failed to decompress cache file"
+  exit 0
+fi
+
+echo "Removing downloaded tarball"
+rm "${TMP_TARBALL}"
