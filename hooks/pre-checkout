@@ -73,3 +73,8 @@ fi
 
 echo "Removing downloaded tarball"
 rm "${TMP_TARBALL}"
+
+echo "Resetting directory"
+cd "${BUILDKITE_BUILD_CHECKOUT_PATH}"
+git reset --hard origin/main
+git submodule update --recursive
