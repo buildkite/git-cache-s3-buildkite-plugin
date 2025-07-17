@@ -14,6 +14,11 @@ set -o pipefail
 # download and decompress it. However if any command fails, we always exit 0 so the checkout hook can
 # do its job, just without the speed or cost benefit of a warm cache.
 
+if [[ "$BUILDKITE_COMPUTE_TYPE" == "hosted" ]]; then
+  echo "Hosted Agents has built in git caching. Skipping S3 caching implementation."
+  exit 0
+fi
+
 BUCKET="$BUILDKITE_PLUGIN_GIT_CACHE_S3_BUCKET"
 REPO_PATH="${BUILDKITE_ORGANIZATION_SLUG}/${BUILDKITE_PIPELINE_SLUG}/git/"
 TMP_TARBALL="/tmp/${BUILDKITE_PIPELINE_SLUG}-$(date +%s).git.tar"

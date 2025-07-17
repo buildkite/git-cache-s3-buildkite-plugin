@@ -1,6 +1,6 @@
 name: git-cache-s3
 description: Download Git Repos from a local S3 bucket for free
-author: https://github.com/yob
+author: https://github.com/buildkite
 requirements:
   - aws
 configuration:
