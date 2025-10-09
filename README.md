@@ -28,7 +28,7 @@ Add the plugin to your steps like this:
 steps:
   - name: ":rspec: Run"
     plugins:
-      - yob/git-cache-s3#main:
+      - git-cache-s3#main:
           bucket: my-buildkite-git-cache
 ```
 
